@@ -1,0 +1,9 @@
+build/
+.gradle/
+.kotlin/
+*.idsig
+local.properties
+.idea/
+*.iml
+captures/
+.deving
