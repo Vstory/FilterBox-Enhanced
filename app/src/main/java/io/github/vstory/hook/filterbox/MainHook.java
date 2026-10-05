@@ -45,6 +45,7 @@ public class MainHook extends XposedModule {
             return;
         }
         ClassLoader cl = param.getClassLoader();
+        AnimHook.install(this, cl);
         hookSnooze();
         hookScoring(cl);
     }
