@@ -19,3 +19,6 @@ dev-project/
 .idea/
 *.iml
 captures/
+
+# ==== Wiki 源文件（独立仓库，不入代码库）====
+wiki-source/
