@@ -13,7 +13,7 @@ public class MainHook extends XposedModule {
 
     @Override
     public void onModuleLoaded(XposedModuleInterface.ModuleLoadedParam param) {
-        log(INFO, TAG, "loaded: " + param.getProcessName());
+        log(INFO, TAG, "loaded: " + param.getProcessName() + " debug=" + BuildConfig.DEBUG);
     }
 
     @Override
