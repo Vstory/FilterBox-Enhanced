@@ -1,8 +1,5 @@
 package io.github.vstory.hook.filterbox;
 
-import static android.util.Log.ERROR;
-import static android.util.Log.INFO;
-
 import android.view.View;
 import android.view.ViewGroup;
 
@@ -27,127 +24,120 @@ import io.github.libxposed.api.XposedModule;
  * {@code RecyclerView#canReuseUpdatedViewHolder(VH)Z}，public 且名字未混淆，是 change
  * 复用决策的唯一入口。对它返回 true，RecyclerView 便复用同一个 ViewHolder 原地重绑，
  * 不产生 cross-fade；该方法只参与 change 决策，新增/删除/移动动画不受影响。
- *
- * <p>debug 变体额外输出观测日志：hook 是否被调用、原决策返回什么、id 是否匹配、change
- * 频率多少。release 变体只留 [OK]/[FAIL]。
  */
 final class AnimHook {
 
-    private static final String TAG = "FilterBoxEnhanced";
-
     private static final String PKG_NP = "com.catchingnow.np";
 
-    /** 观测窗口等于心跳间隔，窗口内明细限量，避免每秒刷新的列表把 logcat 环形缓冲冲掉。 */
-    private static final long HEARTBEAT_MS = 60_000L;
-    private static final int DETAIL_PER_WINDOW = 5;
-
-    /** R.id.rv 的运行时值。资源名「rv」跨版本稳定，数值会随资源混淆变。 */
+    /** R.id.rv 的运行时值。资源名「rv」跨版本稳定，数值会随资源混淆变；-1 = 解析过但拿不到。 */
     private static volatile int sListId;
-    private static volatile boolean sIdResolved;
 
-    private static volatile XposedModule sModule;
-
+    // #ifdef DEBUG
     private static final AtomicInteger sCalls = new AtomicInteger();
     private static final AtomicInteger sHits = new AtomicInteger();
-    /** 命中滤盒列表的调用里，原实现本来返回 false 的次数 —— 即真正的 change 决策数。 */
     private static final AtomicInteger sChanges = new AtomicInteger();
     private static final AtomicInteger sDetail = new AtomicInteger();
-
     private static final Set<Integer> sSkippedIds = ConcurrentHashMap.newKeySet();
+    /** 观测窗口等于心跳间隔；窗口内明细限量，防每秒刷新的列表冲掉日志环形缓冲。 */
+    private static final long HEARTBEAT_MS = 60_000L;
+    private static final int DETAIL_PER_WINDOW = 5;
+    // #endif
 
     private AnimHook() {
     }
 
-    static void install(XposedModule module, ClassLoader cl) {
-        sModule = module;
-        final String desc = "RecyclerView#canReuseUpdatedViewHolder";
-        try {
-            Class<?> rv = Class.forName("androidx.recyclerview.widget.RecyclerView", false, cl);
-            Class<?> vh = Class.forName("androidx.recyclerview.widget.RecyclerView$E", false, cl);
-            Method m = rv.getDeclaredMethod("canReuseUpdatedViewHolder", vh);
-            m.setAccessible(true);
-            // 该方法短小、调用频繁，极易被 AOT 内联进调用点，不 deopt 的话 hook 可能不生效
-            module.deoptimize(m);
-            module.hook(m).intercept(new XposedInterface.Hooker() {
-                @Override
-                public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    sCalls.incrementAndGet();
-                    Object self = chain.getThisObject();
-                    if (!(self instanceof View) || !isFilterBoxList((View) self)) {
-                        noteSkipped(self);
-                        return chain.proceed();
-                    }
-                    sHits.incrementAndGet();
-                    // 原实现无副作用，debug 下先跑一遍拿真实决策：既能量出 change 频率，也证明 hook 拦在了调用点上。
-                    // release 下这段整块消失，只留 return TRUE。
+    static void install(XposedModule module, ClassLoader cl) throws Throwable {
+        Class<?> rv = Class.forName("androidx.recyclerview.widget.RecyclerView", false, cl);
+        Class<?> vh = Class.forName("androidx.recyclerview.widget.RecyclerView$E", false, cl);
+        Method m = rv.getDeclaredMethod("canReuseUpdatedViewHolder", vh);
+        m.setAccessible(true);
+        // 该方法短小且调用频繁，极易被 AOT 内联进调用点，不 deopt 时 hook 可能整体不生效
+        module.deoptimize(m);
+        module.hook(m).intercept(new XposedInterface.Hooker() {
+            @Override
+            public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object self = chain.getThisObject();
+                boolean target = self instanceof View && isFilterBoxList((View) self);
+
+                if (!target) {
+                    // #ifdef DEBUG
                     if (BuildConfig.DEBUG) {
-                        boolean wasChange;
-                        try {
-                            wasChange = !Boolean.TRUE.equals(chain.proceed());
-                        } catch (Throwable t) {
-                            log(ERROR, "orig threw: " + t);
-                            return Boolean.TRUE;
-                        }
-                        if (wasChange) {
-                            sChanges.incrementAndGet();
-                            detail(self, chain.getArg(0));
-                        }
+                        sCalls.incrementAndGet();
+                        noteSkipped(self);
                     }
-                    return Boolean.TRUE;
+                    // #endif
+                    return chain.proceed();
                 }
-            });
-            module.log(INFO, TAG, "[OK] " + desc);
+
+                // #ifdef DEBUG
+                if (BuildConfig.DEBUG) {
+                    sCalls.incrementAndGet();
+                    sHits.incrementAndGet();
+                    // 原实现无副作用，跑一遍只为量出真实决策：既得 change 频率，也证明拦在了调用点上
+                    if (!Boolean.TRUE.equals(chain.proceed())) {
+                        sChanges.incrementAndGet();
+                        detailChange(self, chain.getArg(0));
+                    }
+                }
+                // #endif
+                return Boolean.TRUE;
+            }
+        });
+
+        // #ifdef DEBUG
+        if (BuildConfig.DEBUG) {
             startHeartbeat();
-        } catch (Throwable t) {
-            module.log(ERROR, TAG, "[FAIL] " + desc + ": " + t, t);
         }
+        // #endif
     }
 
     /** 只动滤盒自己的列表。第三方组件（ViewPager2、Material 等）内部的 RecyclerView 不碰。 */
     @SuppressWarnings("deprecation")
     private static boolean isFilterBoxList(View rv) {
-        if (!sIdResolved) {
+        int want = sListId;
+        if (want == 0) {
             synchronized (AnimHook.class) {
-                if (!sIdResolved) {
-                    int id = 0;
+                want = sListId;
+                if (want == 0) {
                     try {
-                        id = rv.getContext().getResources().getIdentifier("rv", "id", PKG_NP);
-                    } catch (Throwable t) {
-                        dbg("id lookup failed: " + t);
+                        want = rv.getContext().getResources().getIdentifier("rv", "id", PKG_NP);
+                    } catch (Throwable ignored) {
                     }
-                    sListId = id;
-                    sIdResolved = true;
-                    dbg("R.id.rv = " + (id == 0 ? "NOT FOUND" : "0x" + Integer.toHexString(id)));
+                    // #ifdef DEBUG
+                    if (BuildConfig.DEBUG) {
+                        MainHook.dbg("R.id.rv = "
+                                + (want == 0 ? "NOT FOUND" : "0x" + Integer.toHexString(want)));
+                    }
+                    // #endif
+                    sListId = want == 0 ? -1 : want;
+                    want = sListId;
                 }
             }
         }
-        int want = sListId;
-        return want != 0 && rv.getId() == want;
+        return want > 0 && rv.getId() == want;
     }
 
-    /** 记下滤盒里除 R.id.rv 之外的 RecyclerView，用来区分「id 不匹配」和「本来就没有」。 */
+    // #ifdef DEBUG
+    /** 记下滤盒里除 R.id.rv 之外的 RecyclerView —— 用来区分「id 不匹配」和「本来没有别的列表」。 */
     private static void noteSkipped(Object self) {
-        if (!BuildConfig.DEBUG || !(self instanceof View)) {
+        if (!(self instanceof View)) {
             return;
         }
         int id = ((View) self).getId();
         if (sSkippedIds.add(id)) {
-            dbg("skip rv id=0x" + Integer.toHexString(id) + " " + self.getClass().getName());
+            MainHook.dbg("skip rv id=0x" + Integer.toHexString(id) + " " + self.getClass().getName());
         }
     }
 
-    private static void detail(Object self, Object holder) {
+    private static void detailChange(Object self, Object holder) {
         if (sDetail.incrementAndGet() > DETAIL_PER_WINDOW) {
             return;
         }
-        dbg("change #" + sChanges.get() + " " + name(self) + " holder=" + name(holder)
+        MainHook.dbg("change #" + sChanges.get() + " " + name(self) + " holder=" + name(holder)
                 + " children=" + childCount(self));
     }
 
     private static void startHeartbeat() {
-        if (!BuildConfig.DEBUG) {
-            return;
-        }
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -161,8 +151,9 @@ final class AnimHook {
                     int hits = sHits.getAndSet(0);
                     int changes = sChanges.getAndSet(0);
                     sDetail.set(0);
-                    // 全 0 也照打：这是区分「hook 没被调用」和「模块没注入」的唯一依据
-                    dbg("stat 60s: calls=" + calls + " hits=" + hits + " changes=" + changes);
+                    // 全 0 也照打：这是区分「hook 未被调用」和「模块没注入」的唯一依据
+                    MainHook.dbg("stat 60s: calls=" + calls + " hits=" + hits
+                            + " changes=" + changes);
                 }
             }
         }, "fb-anim-stat");
@@ -178,17 +169,5 @@ final class AnimHook {
     private static int childCount(Object o) {
         return o instanceof ViewGroup ? ((ViewGroup) o).getChildCount() : -1;
     }
-
-    private static void dbg(String msg) {
-        if (BuildConfig.DEBUG) {
-            log(INFO, msg);
-        }
-    }
-
-    private static void log(int prio, String msg) {
-        XposedModule m = sModule;
-        if (m != null) {
-            m.log(prio, TAG, msg);
-        }
-    }
+    // #endif
 }
