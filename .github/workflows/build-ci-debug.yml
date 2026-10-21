@@ -1,10 +1,10 @@
-name: Build · CI
+name: Build · CI Debug
 
 # CI 渠道（测试版）：任意分支 push 都出包，发进固定 tag `ci` 的**同一个滚动页**，产物按时间戳
 # 追加、页面永不新增。分支本来就是用来试的 ⇒ 每次提交都该能立刻拿到包。
 # ⚠️ push 侧必须显式写 branches：只写 paths-ignore 时**标签推送也会触发**（release 工作流建的
 #    tag 会反手把 CI 跑一遍）。`[ '**' ]` 只匹配分支，恰好把标签挡在外面。
-run-name: "Build · CI · ${{ github.ref_name }}"
+run-name: "Build · CI Debug · ${{ github.ref_name }}"
 
 on:
   push:
